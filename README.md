@@ -22,7 +22,7 @@ This toolkit is designed to be directly integrated into your projects.
 
 ### Step 1: Add the Toolkit to Your Project
 
-Copy the Python file containing the `YoloModel`, `YoloClassification`, and `YoloDetection` classes (e.g., `yolo_toolkit.py`) into a utility folder within your own project (e.g., `/utils` or `/lib`). You can then import the classes directly.
+Copy the [Python file](util/YoloModel.py) containing the `YoloModel`, `YoloClassification`, and `YoloDetection` classes (e.g., `yolo_toolkit.py`) into a utility folder within your own project (e.g., `/utils` or `/lib`). You can then import the classes directly.
 
 ### Step 2: Install Required Dependencies
 
