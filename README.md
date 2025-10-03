@@ -149,7 +149,7 @@ for box, keypoints, score, class_name in decoded_results:
 
 The toolkit uses an inheritance structure to maximize code reuse and clarity.
 
-### `YoloModel` (Base Class)
+### `YoloModel`
 -   The top-level class for all models.
 
 ### `YoloClassification(YoloModel)`
