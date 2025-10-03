@@ -147,6 +147,8 @@ for box, keypoints, score, class_name in decoded_results:
 
 ## Class Reference
 
+![alt text](docs/mermaid-class-diagram.png)
+
 The toolkit uses an inheritance structure to maximize code reuse and clarity.
 
 ### `YoloModel`
