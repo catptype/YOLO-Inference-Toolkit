@@ -1,6 +1,7 @@
 # ==================================
 #         Import Dependencies
 # ==================================
+import cv2
 import numpy as np
 import supervision as sv
 from typing import Union, List, Any, Tuple, Dict
@@ -162,235 +163,207 @@ class YoloClassification(YoloModel):
         names = [self.class_names[i] for i in indices]
         scores = result.probs.top5conf.tolist()
         return list(zip(names, scores))
-    
-# ==================================
-#      YoloDetection (Subclass)
-# ==================================
-class YoloDetection(YoloModel):
-    """
-    A specialized class for YOLO object detection and tracking tasks
-    using supervision for stateful tracking.
-    """
-    def __init__(self, model_path: str, warmup: bool = True) -> None:
-        """
-        Initializes the detection model and the stateful tracker.
 
-        Args:
-            model_path (str): Path to the detection model file.
-            warmup (bool): If True, runs a dummy inference to warm up the model.
-        """
-        super().__init__(model_path, task='detect')
+# =================================================================
+#  YoloObjectBase (NEW Intermediate Base Class)
+# =================================================================
+class YoloObjectBase(YoloModel):
+    """
+    An intermediate base class for object-based tasks (detection, segmentation, pose).
+    Contains shared logic for prediction, tracking, and basic object extraction.
+    """
+    def __init__(self, model_path: str, task: str, warmup: bool = True) -> None:
+        super().__init__(model_path, task=task)
         if warmup:
             self.warmup(imgsz=self.training_imgsz or 640)
-        
-        # Initialize a stateful tracker for the instance
         self.tracker = sv.ByteTrack()
 
     def _set_default_kwargs(self, kwargs: Dict) -> Dict:
-        """Helper to set default prediction arguments to avoid code repetition."""
-        kwargs.setdefault('conf', 0.5)
-        kwargs.setdefault('iou', 0.5)
-        kwargs.setdefault('max_det', 50)
-        kwargs.setdefault('agnostic_nms', True)
+        kwargs.setdefault('conf', 0.5); kwargs.setdefault('iou', 0.5)
+        kwargs.setdefault('max_det', 50); kwargs.setdefault('agnostic_nms', True)
         return kwargs
 
-    def _decode_single_result(self, result: Results, mode: str) -> list:
-        """Helper for decoding one ultralytics.Results object."""
-        if not mode in ['xyxy', 'xyxyn', 'xywh', 'xywhn']:
-            raise ValueError(f"mode must be one of ['xyxy', 'xyxyn', 'xywh', 'xywhn']")
-        
-        boxes = result.boxes
-        if not boxes: return []
-
-        # Extract coordinates, scores, and class names
-        box_coords = [[int(v) for v in box] for box in getattr(boxes, mode).tolist()] if mode in ['xyxy', 'xywh'] else getattr(boxes, mode).tolist()
-        scores = boxes.conf.tolist()
-        class_names = [self.class_names[int(id)] for id in boxes.cls.tolist()]
-        
-        return list(zip(box_coords, scores, class_names))
-
     def predict(self, source: Union[np.ndarray, List[np.ndarray]], **kwargs: Any) -> Union[Results, List[Results]]:
-        """
-        Runs stateless object detection. Handles both single and batch sources.
-
-        Args:
-            source: A single image (np.ndarray) or a list of images.
-            **kwargs: Additional ultralytics predict arguments. If not provided,
-                the following defaults are used:
-                - conf (float): 0.5
-                - iou (float): 0.5
-                - max_det (int): 50
-                - agnostic_nms (bool): True
-
-        Returns:
-            A single ultralytics.Results object or a list of them.
-        """
         is_batch = isinstance(source, list)
         kwargs = self._set_default_kwargs(kwargs)
         results = self.model.predict(source, verbose=False, **kwargs)
         return results if is_batch else results[0]
     
     def tracking(self, source: np.ndarray, **kwargs: Any) -> Detections:
-        """
-        Performs prediction on a single frame and updates the stateful tracker.
-        This method does NOT support batch processing.
-
-        Args:
-            source (np.ndarray): A single image or video frame.
-            **kwargs: Additional arguments for the predict call. If not provided,
-                the following defaults are used:
-                - conf (float): 0.5
-                - iou (float): 0.5
-                - max_det (int): 50
-                - agnostic_nms (bool): True
-
-        Returns:
-            A supervision.Detections object with tracker IDs assigned.
-        
-        Raises:
-            ValueError: If the source is a list (batch input).
-        """
         if isinstance(source, list):
-            raise ValueError("The 'tracking' method does not support batch inputs. Please process frames sequentially.")
-        
-        # Step 1: Set prediction arguments
+            raise ValueError("The 'tracking' method does not support batch inputs.")
         kwargs = self._set_default_kwargs(kwargs)
-
-        # Step 2: Run prediction on the single frame
         results: Results = self.model.predict(source, verbose=False, **kwargs)[0]
-
-        # Step 3: Convert the raw results to a supervision Detections object
         detections = Detections.from_ultralytics(results)
-
-        # Step 4: Update the tracker with the new detections and get tracked objects
-        tracked_detections = self.tracker.update_with_detections(detections)
-        
-        return tracked_detections
+        return self.tracker.update_with_detections(detections)
     
-    def decode_results(self, results: Union[Results, List[Results]], mode: str = 'xyxy') -> Union[list, List[list]]:
+    def extract_object(self, image: np.ndarray, box_xyxy: Tuple[int, int, int, int], offset: int = 0) -> np.ndarray:
+        x1, y1, x2, y2 = map(int, box_xyxy)
+        x1, y1 = max(x1 - offset, 0), max(y1 - offset, 0)
+        x2, y2 = min(x2 + offset, image.shape[1]), min(y2 + offset, image.shape[0])
+        return image[y1:y2, x1:x2]
+    
+# =================================================================
+#  YoloDetection (Now a very simple subclass)
+# =================================================================
+class YoloDetection(YoloObjectBase):
+    """
+    A specialized class for standard object detection.
+    Inherits all prediction and tracking logic from YoloObjectBase.
+    """
+    def __init__(self, model_path: str, warmup: bool = True) -> None:
+        super().__init__(model_path, task='detect', warmup=warmup)
+
+    def decode_results(self, results: Union[Results, List[Results]]) -> Union[list, List[list]]:
+        """Decodes raw ultralytics Results into a list of [(box, score, class_name)]."""
+        if isinstance(results, list):
+            return [self._decode_single_result(res) for res in results]
+        else:
+            return self._decode_single_result(results)
+
+    def _decode_single_result(self, result: Results) -> list:
+        boxes = result.boxes
+        if not boxes: return []
+        box_coords = [[int(v) for v in box] for box in boxes.xyxy.tolist()]
+        scores = boxes.conf.tolist()
+        class_names = [self.class_names[int(id)] for id in boxes.cls.tolist()]
+        return list(zip(box_coords, scores, class_names))
+
+    def decode_detections(self, detections: Detections) -> list:
+        """Decodes supervision Detections into a list of [(tracker_id, box, score, class_name)]."""
+        if detections.is_empty(): return []
+        if detections.tracker_id is None: raise ValueError("Input Detections object has no tracker_id.")
+        
+        tracker_ids = detections.tracker_id.tolist()
+        box_coords = [[int(v) for v in box] for box in detections.xyxy.tolist()]
+        scores = detections.confidence.tolist()
+        class_names = [self.class_names[id] for id in detections.class_id.tolist()]
+        return list(zip(tracker_ids, box_coords, scores, class_names))
+
+# =================================================================
+#  YoloSegmentation (Also a very simple subclass)
+# =================================================================
+class YoloSegmentation(YoloObjectBase):
+    """
+    A specialized class for instance segmentation.
+    Inherits all prediction and tracking logic from YoloObjectBase.
+    """
+    def __init__(self, model_path: str, warmup: bool = True) -> None:
+        super().__init__(model_path, task='segment', warmup=warmup)
+
+    def decode_results(self, results: Union[Results, List[Results]]) -> Union[list, List[list]]:
+        """Decodes raw Results into a list of [(box, polygon_mask, score, class_name)]."""
+        if isinstance(results, list):
+            return [self._decode_single_result(res) for res in results]
+        else:
+            return self._decode_single_result(results)
+
+    def _decode_single_result(self, result: Results) -> list:
+        if result.masks is None: return []
+        boxes = result.boxes
+        masks = [segment.astype(int) for segment in result.masks.xy]
+        box_coords = [[int(v) for v in box] for box in boxes.xyxy.tolist()]
+        scores = boxes.conf.tolist()
+        class_names = [self.class_names[int(id)] for id in boxes.cls.tolist()]
+        return list(zip(box_coords, masks, scores, class_names))
+
+    def decode_detections(self, detections: Detections) -> list:
+        """Decodes supervision Detections into a list of [(tracker_id, box, binary_mask, score, class_name)]."""
+        if detections.is_empty(): return []
+        if detections.tracker_id is None: raise ValueError("Input Detections object has no tracker_id.")
+        if detections.mask is None: raise ValueError("Input Detections object has no segmentation masks.")
+
+        tracker_ids = detections.tracker_id.tolist()
+        box_coords = [[int(v) for v in box] for box in detections.xyxy.tolist()]
+        masks = [m for m in detections.mask]
+        scores = detections.confidence.tolist()
+        class_names = [self.class_names[id] for id in detections.class_id.tolist()]
+        return list(zip(tracker_ids, box_coords, masks, scores, class_names))
+
+    def segment_object(self, image: np.ndarray, box_xyxy: tuple, mask: np.ndarray, offset: int = 0) -> np.ndarray:
+        """Extracts a segmented object from an image, handling both polygon and binary masks."""
+        if mask.dtype == bool:
+            binary_mask = mask.astype(np.uint8) * 255
+        else:
+            binary_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            cv2.drawContours(binary_mask, [mask.astype(int)], -1, (255), thickness=cv2.FILLED)
+
+        isolated_object = cv2.bitwise_and(image, image, mask=binary_mask)
+        return self.extract_object(isolated_object, box_xyxy, offset)
+
+class YoloPose(YoloObjectBase):
+    """
+    A specialized class for pose estimation.
+    Inherits all prediction and tracking logic from YoloObjectBase.
+    """
+    def __init__(self, model_path: str, warmup: bool = True) -> None:
         """
-        Decodes raw ultralytics.Results into a simplified list format.
+        Initializes the pose estimation model.
 
         Args:
-            results: A single Results object or a list of them.
-            mode (str): The bounding box format ('xyxy', 'xywh', 'xyxyn', 'xywhn').
+            model_path (str): Path to the pose estimation model file.
+            warmup (bool): If True, runs a dummy inference to warm up the model.
+        """
+        super().__init__(model_path, task='pose', warmup=warmup)
+
+    def decode_results(self, results: Union[Results, List[Results]]) -> Union[list, List[list]]:
+        """
+        Decodes raw ultralytics Results into a simplified list format.
 
         Returns:
-            For a single result: A list of [(box_coords, score, class_name)].
-            For a list of results: A list of lists, one for each result.
+            A list of [(box_coords, keypoints, score, class_name)] for each instance.
+            The 'keypoints' are a numpy array of shape (num_keypoints, 2) with [x, y] coordinates.
         """
         if isinstance(results, list):
-            return [self._decode_single_result(res, mode) for res in results]
+            return [self._decode_single_result(res) for res in results]
         else:
-            return self._decode_single_result(results, mode)
+            return self._decode_single_result(results)
+
+    def _decode_single_result(self, result: Results) -> list:
+        """Helper for decoding one ultralytics.Results object."""
+        # Ensure there are keypoints to process
+        if result.keypoints is None: 
+            return []
+        
+        boxes = result.boxes
+        
+        # Extract each piece of data into its own variable
+        box_coords = [[int(v) for v in box] for box in boxes.xyxy.tolist()]
+        scores = boxes.conf.tolist()
+        class_names = [self.class_names[int(id)] for id in boxes.cls.tolist()]
+        
+        # Extract keypoints (num_instances, num_keypoints, 2)
+        keypoints_data = result.keypoints.xy.cpu().numpy().astype(int)
+        keypoints_list = [kps for kps in keypoints_data] # Convert to a list of arrays
+
+        return list(zip(box_coords, keypoints_list, scores, class_names))
 
     def decode_detections(self, detections: Detections) -> list:
         """
-        Decodes a supervision.Detections object (output from tracking) into a simplified list.
-
-        Args:
-            detections (Detections): A supervision.Detections object, typically with tracker IDs.
+        Decodes a supervision.Detections object (from tracking) into a simplified list.
 
         Returns:
-            A list of [(tracker_id, box_coords, score, class_name)].
-        
-        Raises:
-            ValueError: If the Detections object does not contain tracker_id.
+            A list of [(tracker_id, box_coords, keypoints, score, class_name)].
+            The 'keypoints' are a numpy array of shape (num_keypoints, 2) with [x, y] coordinates.
         """
+        # Ensure there are detections to process
         if detections.is_empty(): 
             return []
-            
-        if detections.tracker_id is None:
+        if detections.tracker_id is None: 
             raise ValueError("Input Detections object does not have tracker_id.")
+        # `supervision` stores keypoints in the 'data' dictionary under 'keypoints'
+        if 'keypoints' not in detections.data:
+            raise ValueError("Input Detections object does not have keypoints data.")
 
-        # Extract tracker IDs, boxes, scores, and class names
+        # Extract each piece of data into its own variable
         tracker_ids = detections.tracker_id.tolist()
-        box_coords = [[int(val) for val in box] for box in detections.xyxy.tolist()] 
+        box_coords = [[int(val) for val in box] for box in detections.xyxy.tolist()]
         scores = detections.confidence.tolist()
-        class_names = [self.class_names[id] for id in detections.class_id.tolist()] 
-
-        return list(zip(tracker_ids, box_coords, scores, class_names))
-
-    def extract_object(self, image: np.ndarray, box_xyxy: Tuple[int, int, int, int], offset: int = 0) -> np.ndarray:
-        """
-        Extracts a detected object from an image using its bounding box.
-
-        Args:
-            image (np.ndarray): The source image.
-            box_xyxy (tuple): A tuple of (x1, y1, x2, y2) coordinates.
-            offset (int): An optional pixel offset to add/subtract from the box, creating a margin.
-
-        Returns:
-            An np.ndarray containing the cropped object image.
-        """
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = map(int, box_xyxy)
-
-        # Apply offset and clamp coordinates to be within the image boundaries
-        x1 = max(x1 - offset, 0)
-        y1 = max(y1 - offset, 0)
-        x2 = min(x2 + offset, width)
-        y2 = min(y2 + offset, height)
-
-        # Crop and return the image
-        return image[y1:y2, x1:x2]
-    
-class YoloSegmentation(YoloModel):
-    def __init__(self, model):
-        super().__init__(model, task='segment')
-        self.predict(np.zeros((1, 1, 3), dtype=np.uint8))
-        self.tracker = sv.ByteTrack()
-
-    def predict(self, source, conf:float=0.5, iou:float=0.5, max_det=100, agnostic_nms=True, **kwargs:Any) -> Results:
-        """
-        Ultralytic defaults
-        max_det=300
-        agnostic_nms=False
-        """
-        return self.model(source, conf=conf, iou=iou, max_det=max_det, agnostic_nms=agnostic_nms, verbose=False, **kwargs)[0]
-    
-    def get_info(self, results:Results, mode='xyxy', cls_idx=False) -> list:
-        if not mode in ['xyxy', 'xyxyn', 'xywh', 'xywhn']:
-            raise ValueError(f"mode must be ['xyxy', 'xyxyn', 'xywh', 'xywhn']")
+        class_names = [self.class_names[id] for id in detections.class_id.tolist()]
         
-        boxes = results.boxes
-
-        box = [[int(val) for val in box] for box in getattr(boxes, mode).tolist()] if mode in ['xyxy', 'xywh'] else getattr(boxes, mode).tolist()
-        mask = [segment.astype(int) for segment in results.masks.xy]
-        score = boxes.conf.tolist()
-        if not cls_idx:
-            cls_name = [self.cls_dict[id] for id in boxes.cls.tolist()]
-        else:
-            cls_name = [id for id in boxes.cls.tolist()]
-
-        if boxes.is_track:
-            obj_id = map(int, boxes.id.tolist())
-            return list(zip(obj_id, box, mask, score, cls_name))
-
-        else:
-            return list(zip(box, mask, score, cls_name))
+        # Extract keypoints from the 'data' attribute
+        keypoints_data = detections.data['keypoints'].astype(int)
+        keypoints_list = [kps for kps in keypoints_data] # Convert to a list of arrays
         
-    def segment_detect(self, image:np.ndarray, box_xyxy:tuple, mask:np.ndarray, offset:int = 0) -> np.ndarray:
-        binary_mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        cv2.drawContours(binary_mask, [mask], -1, (255), thickness=cv2.FILLED)
-        isolated_object = cv2.bitwise_and(image, image, mask=binary_mask)
-        crop_image = self.extract_detect(isolated_object, box_xyxy, offset)
-        return crop_image
+        return list(zip(tracker_ids, box_coords, keypoints_list, scores, class_names))
     
-    # Extract image
-    def extract_detect(self, image:np.ndarray, box_xyxy:tuple, offset:int = 0) -> np.ndarray:
-
-        height, width = image.shape[:2]
-
-        # Decode box coordinate tuple
-        x1, y1, x2, y2 = box_xyxy
-
-        # Processing coordinate with offset
-        x1 = max(x1 - offset, 0) # prevent x1 become negative
-        y1 = max(y1 - offset, 0) # prevent y1 become negative
-        x2 = min(width, x2 + offset) # prevent x2 overflow from vdeo frame
-        y2 = min(height, y2 + offset) # prevent y2 overflow from vdeo frame
-
-        # Extract image
-        extract_image = image[y1:y2, x1:x2]
-        return extract_image
