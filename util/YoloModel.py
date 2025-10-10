@@ -231,6 +231,7 @@ class YoloObjectBase(YoloModel):
         kwargs = self._set_default_kwargs(kwargs)
         results: Results = self.model.predict(source, verbose=False, **kwargs)[0]
         detections = Detections.from_ultralytics(results)
+        detections = self.tracker.update_with_detections(detections)
 
         # Extend data for keypoints
         if self.task == 'pose':
@@ -239,7 +240,7 @@ class YoloObjectBase(YoloModel):
         else:
             detections.data["keypoints"] = None
 
-        return self.tracker.update_with_detections(detections)
+        return detections
     
     def extract_object(self, image: np.ndarray, box_xyxy: Tuple[int, int, int, int], offset: int = 0) -> np.ndarray:
         """
