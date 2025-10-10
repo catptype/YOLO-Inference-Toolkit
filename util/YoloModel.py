@@ -27,6 +27,7 @@ class YoloModel:
             model_path (str): The path to the YOLO model file (e.g., 'yolov8n.pt').
             task (str): The task for the model, e.g., 'detect', 'classify'.
         """
+        self.task = task
         self.model = YOLO(model_path, task=task)
 
     def warmup(self, imgsz: int = 640) -> None:
@@ -230,6 +231,14 @@ class YoloObjectBase(YoloModel):
         kwargs = self._set_default_kwargs(kwargs)
         results: Results = self.model.predict(source, verbose=False, **kwargs)[0]
         detections = Detections.from_ultralytics(results)
+
+        # Extend data for keypoints
+        if self.task == 'pose':
+            keypoints_data = results.keypoints.xy.cpu().numpy()
+            detections.data["keypoints"] = keypoints_data
+        else:
+            detections.data["keypoints"] = None
+
         return self.tracker.update_with_detections(detections)
     
     def extract_object(self, image: np.ndarray, box_xyxy: Tuple[int, int, int, int], offset: int = 0) -> np.ndarray:
